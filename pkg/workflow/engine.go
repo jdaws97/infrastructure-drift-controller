@@ -52,7 +52,7 @@ func New(config config.WorkflowConfig, db *database.DB, notifier *notification.S
 // CreateWorkflowForDrift creates a workflow for a detected drift
 func (e *Engine) CreateWorkflowForDrift(drift *models.Drift) error {
 	// Find the appropriate workflow template for this drift
-	template, err := e.templateMatcher.FindTemplateForResource(drift.Resource)
+	template, err := e.templateMatcher.FindTemplateForDrift(drift, drift.Resource)
 	if err != nil {
 		return fmt.Errorf("failed to find workflow template: %w", err)
 	}
@@ -71,7 +71,7 @@ func (e *Engine) CreateWorkflowForDrift(drift *models.Drift) error {
 	}
 	
 	// Create actions from template
-	for i, actionTemplate := range template.Actions {
+	for _, actionTemplate := range template.Actions {
 		action := models.WorkflowAction{
 			ID:          uuid.New().String(),
 			WorkflowID:  workflow.ID,
@@ -307,11 +307,11 @@ func (e *Engine) executeNotifyAction(workflow *models.Workflow, action *models.W
 // executeApprovalAction handles approval requests
 func (e *Engine) executeApprovalAction(workflow *models.Workflow, action *models.WorkflowAction, drift *models.Drift, resource *models.Resource) error {
 	// Create an approval request
-	approvalRequest := &ApprovalRequest{
+	approvalRequest := &database.ApprovalRequest{
 		ID:          uuid.New().String(),
 		WorkflowID:  workflow.ID,
 		ActionID:    action.ID,
-		Status:      ApprovalStatusPending,
+		Status:      database.ApprovalStatusPending,
 		CreatedAt:   time.Now(),
 		Approvers:   action.Config.Approvers,
 		MinApprovals: action.Config.MinApprovals,
@@ -388,7 +388,7 @@ func (e *Engine) executeApprovalAction(workflow *models.Workflow, action *models
 }
 
 // waitForApproval waits for an approval request to be resolved
-func (e *Engine) waitForApproval(request *ApprovalRequest) (bool, error) {
+func (e *Engine) waitForApproval(request *database.ApprovalRequest) (bool, error) {
 	// Check every minute for approval status
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -403,19 +403,19 @@ func (e *Engine) waitForApproval(request *ApprovalRequest) (bool, error) {
 			}
 			
 			// Check if it's been approved
-			if updated.Status == ApprovalStatusApproved {
+			if updated.Status == database.ApprovalStatusApproved {
 				return true, nil
 			}
 			
 			// Check if it's been rejected
-			if updated.Status == ApprovalStatusRejected {
+			if updated.Status == database.ApprovalStatusRejected {
 				return false, nil
 			}
 			
 			// Check if it's expired
 			if updated.ExpiresAt != nil && time.Now().After(*updated.ExpiresAt) {
 				// Update status to expired
-				updated.Status = ApprovalStatusExpired
+				updated.Status = database.ApprovalStatusExpired
 				if err := e.db.UpdateApprovalRequest(updated); err != nil {
 					log.Printf("Error updating expired approval request: %v", err)
 				}

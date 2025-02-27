@@ -717,7 +717,7 @@ type Approval struct {
 func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters for filtering
 	var workflowID, actionID, resourceID string
-	var status ApprovalStatus
+	var status database.ApprovalStatus
 	
 	if r.URL.Query().Get("workflow_id") != "" {
 		workflowID = r.URL.Query().Get("workflow_id")
@@ -729,7 +729,7 @@ func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 		resourceID = r.URL.Query().Get("resource_id")
 	}
 	if r.URL.Query().Get("status") != "" {
-		status = ApprovalStatus(r.URL.Query().Get("status"))
+		status = database.ApprovalStatus(r.URL.Query().Get("status"))
 	}
 	
 	// Get approvals from database
@@ -802,7 +802,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Add approval
-	approval.Approvals = append(approval.Approvals, Approval{
+	approval.Approvals = append(approval.Approvals, database.Approval{
 		ApproverID:  approveRequest.ApproverID,
 		ApprovedAt:  time.Now(),
 		Comment:     approveRequest.Comment,
@@ -810,7 +810,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	
 	// Check if we have enough approvals
 	if len(approval.Approvals) >= approval.MinApprovals {
-		approval.Status = ApprovalStatusApproved
+		approval.Status = database.ApprovalStatusApproved
 	}
 	
 	// Update approval in database
@@ -859,7 +859,7 @@ func (s *Server) handleReject(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Reject the approval
-	approval.Status = ApprovalStatusRejected
+	approval.Status = database.ApprovalStatusRejected
 	
 	// Update approval in database
 	if err := s.db.UpdateApprovalRequest(approval); err != nil {

@@ -179,10 +179,10 @@ func (p *Provider) collectVMState(ctx context.Context, resource *models.Resource
 		"name":          *vm.Name,
 		"location":      *vm.Location,
 		"vm_size":       *vm.Properties.HardwareProfile.VMSize,
-		"os_type":       getOSType(vm),
-		"admin_username": getAdminUsername(vm),
-		"network_interfaces": getNICs(vm),
-		"boot_diagnostics_enabled": isBootDiagnosticsEnabled(vm),
+		"os_type":       getOSType(&vm.VirtualMachine),
+		"admin_username": getAdminUsername(&vm.VirtualMachine),
+		"network_interfaces": getNICs(&vm.VirtualMachine),
+		"boot_diagnostics_enabled": isBootDiagnosticsEnabled(&vm.VirtualMachine),
 	}
 	
 	// Add OS disk details
@@ -523,7 +523,7 @@ func (p *Provider) discoverVMs(ctx context.Context, subscriptionID string, filte
 	
 	// If resource group specified, list VMs in that group
 	if rg := getGroupFromFilter(filter); rg != "" {
-		pager := vmClient.NewListByResourceGroupPager(rg, nil)
+		pager := vmClient.NewListPager(rg, nil)
 		
 		for pager.More() {
 			page, err := pager.NextPage(ctx)

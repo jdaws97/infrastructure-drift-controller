@@ -113,6 +113,8 @@ type WorkflowTemplate struct {
 	Providers     []ProviderType `json:"providers,omitempty"`
 	Tags          Tags `json:"tags,omitempty"`
 	
+	Properties map[string]interface{} `json:"properties,omitempty"`
+
 	// Action templates
 	Actions []WorkflowActionTemplate `json:"actions"`
 }

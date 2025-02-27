@@ -64,6 +64,41 @@ func (m *TemplateMatcher) FindTemplateForDrift(drift *models.Drift, resource *mo
 	return bestTemplate, nil
 }
 
+func (m *TemplateMatcher) FindTemplateForResource(drift *models.Drift, resource *models.Resource) (*models.WorkflowTemplate, error) {
+	// Get all templates
+	templates, err := m.db.GetWorkflowTemplates()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load workflow templates: %w", err)
+	}
+	
+	// Find the best matching template
+	var bestTemplate *models.WorkflowTemplate
+	bestMatchScore := 0
+	
+	for _, template := range templates {
+		score := m.calculateMatchScore(template, resource, drift)
+		
+		if score > bestMatchScore {
+			bestMatchScore = score
+			bestTemplate = template
+		}
+	}
+	
+	// Check if we found a matching template
+	if bestTemplate == nil {
+		// Get default template
+		for _, template := range templates {
+			if template.IsDefault {
+				return template, nil
+			}
+		}
+		
+		return nil, fmt.Errorf("no matching template found")
+	}
+	
+	return bestTemplate, nil
+}
+
 // calculateMatchScore calculates how well a template matches a resource and drift
 func (m *TemplateMatcher) calculateMatchScore(template *models.WorkflowTemplate, resource *models.Resource, drift *models.Drift) int {
 	score := 0
