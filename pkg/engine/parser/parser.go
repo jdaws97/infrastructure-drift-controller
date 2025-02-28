@@ -9,6 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jdaws97/infrastructure-drift-controller/pkg/engine/parser/ansible"
+	"github.com/jdaws97/infrastructure-drift-controller/pkg/engine/parser/arm"
+	"github.com/jdaws97/infrastructure-drift-controller/pkg/engine/parser/cloudformation"
+	"github.com/jdaws97/infrastructure-drift-controller/pkg/engine/parser/pulumi"
+	"github.com/jdaws97/infrastructure-drift-controller/pkg/engine/parser/terraform"
 	"github.com/jdaws97/infrastructure-drift-controller/pkg/models"
 	"github.com/jdaws97/infrastructure-drift-controller/pkg/storage/database"
 )
@@ -23,10 +28,10 @@ type UniversalParser struct {
 type IaCAdapter interface {
 	// ParseFile parses a file and returns resources and their expected states
 	ParseFile(filePath string) ([]*models.Resource, []*models.ResourceState, error)
-	
+
 	// ParseDirectory parses a directory of IaC files
 	ParseDirectory(dirPath string) ([]*models.Resource, []*models.ResourceState, error)
-	
+
 	// GenerateResourceID generates a consistent ID for a resource
 	GenerateResourceID(resource map[string]interface{}, provider models.ProviderType) string
 }
@@ -37,14 +42,14 @@ func New(db *database.DB) *UniversalParser {
 		db:       db,
 		adapters: make(map[models.IaCType]IaCAdapter),
 	}
-	
+
 	// Register adapters
-	parser.adapters[models.IaCTypeTerraform] = NewTerraformAdapter()
-	parser.adapters[models.IaCTypeCloudFormation] = NewCloudFormationAdapter()
-	parser.adapters[models.IaCTypePulumi] = NewPulumiAdapter()
-	parser.adapters[models.IaCTypeAnsible] = NewAnsibleAdapter()
-	parser.adapters[models.IaCTypeARMTemplate] = NewARMAdapter()
-	
+	parser.adapters[models.IaCTypeTerraform] = terraform.NewTerraformAdapter()
+	parser.adapters[models.IaCTypeCloudFormation] = cloudformation.NewCloudFormationAdapter()
+	parser.adapters[models.IaCTypePulumi] = pulumi.NewPulumiAdapter()
+	parser.adapters[models.IaCTypeAnsible] = ansible.NewAnsibleAdapter()
+	parser.adapters[models.IaCTypeARMTemplate] = arm.NewARMAdapter()
+
 	return parser
 }
 
@@ -59,13 +64,13 @@ func (p *UniversalParser) ParseIaCFile(filePath string, iacType models.IaCType) 
 	if !exists {
 		return fmt.Errorf("unsupported IaC type: %s", iacType)
 	}
-	
+
 	// Parse the file
 	resources, states, err := adapter.ParseFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to parse file %s: %w", filePath, err)
 	}
-	
+
 	// Store resources and states in database
 	for i, resource := range resources {
 		// Check if resource already exists
@@ -85,20 +90,20 @@ func (p *UniversalParser) ParseIaCFile(filePath string, iacType models.IaCType) 
 				return fmt.Errorf("failed to create resource %s: %w", resource.ID, err)
 			}
 		}
-		
+
 		// Store the state
 		if i < len(states) {
 			if err := p.db.SaveResourceState(states[i]); err != nil {
 				return fmt.Errorf("failed to save resource state for %s: %w", resource.ID, err)
 			}
 		}
-		
+
 		// Store metadata about the IaC file
 		if err := p.db.SetResourceMetadata(resource.ID, fmt.Sprintf("%s_file_path", iacType), filePath); err != nil {
 			return fmt.Errorf("failed to save resource metadata: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -108,13 +113,13 @@ func (p *UniversalParser) ParseIaCDirectory(dirPath string, iacType models.IaCTy
 	if !exists {
 		return fmt.Errorf("unsupported IaC type: %s", iacType)
 	}
-	
+
 	// Parse the directory
 	resources, states, err := adapter.ParseDirectory(dirPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse directory %s: %w", dirPath, err)
 	}
-	
+
 	// Store resources and states in database
 	for i, resource := range resources {
 		// Check if resource already exists
@@ -134,20 +139,20 @@ func (p *UniversalParser) ParseIaCDirectory(dirPath string, iacType models.IaCTy
 				return fmt.Errorf("failed to create resource %s: %w", resource.ID, err)
 			}
 		}
-		
+
 		// Store the state
 		if i < len(states) {
 			if err := p.db.SaveResourceState(states[i]); err != nil {
 				return fmt.Errorf("failed to save resource state for %s: %w", resource.ID, err)
 			}
 		}
-		
+
 		// Store metadata about the IaC directory
 		if err := p.db.SetResourceMetadata(resource.ID, fmt.Sprintf("%s_dir_path", iacType), dirPath); err != nil {
 			return fmt.Errorf("failed to save resource metadata: %w", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -155,7 +160,7 @@ func (p *UniversalParser) ParseIaCDirectory(dirPath string, iacType models.IaCTy
 func (p *UniversalParser) AutoDetectIaCType(filePath string) (models.IaCType, error) {
 	// Check file extension first
 	ext := strings.ToLower(filepath.Ext(filePath))
-	
+
 	switch ext {
 	case ".tf":
 		return models.IaCTypeTerraform, nil
@@ -167,7 +172,7 @@ func (p *UniversalParser) AutoDetectIaCType(filePath string) (models.IaCType, er
 		// Could be CloudFormation, ARM template, or other JSON-based IaC
 		return p.detectJSONType(filePath)
 	}
-	
+
 	return "", fmt.Errorf("unable to determine IaC type for file: %s", filePath)
 }
 
@@ -178,20 +183,25 @@ func (p *UniversalParser) detectYAMLType(filePath string) (models.IaCType, error
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
-	
+
 	// Look for common patterns in the content
 	contentStr := string(content)
-	
-	if strings.Contains(contentStr, "AWSTemplateFormatVersion") || 
-	   strings.Contains(contentStr, "Resources:") && strings.Contains(contentStr, "Type: AWS::") {
+
+	if strings.Contains(contentStr, "AWSTemplateFormatVersion") ||
+		strings.Contains(contentStr, "Resources:") && strings.Contains(contentStr, "Type: AWS::") {
 		return models.IaCTypeCloudFormation, nil
 	}
-	
-	if strings.Contains(contentStr, "hosts:") && 
-	   (strings.Contains(contentStr, "tasks:") || strings.Contains(contentStr, "roles:")) {
+
+	if strings.Contains(contentStr, "hosts:") &&
+		(strings.Contains(contentStr, "tasks:") || strings.Contains(contentStr, "roles:")) {
 		return models.IaCTypeAnsible, nil
 	}
-	
+
+	// Check for Pulumi
+	if strings.Contains(contentStr, "name:") && strings.Contains(contentStr, "runtime:") {
+		return models.IaCTypePulumi, nil
+	}
+
 	return "", fmt.Errorf("unable to determine YAML IaC type for file: %s", filePath)
 }
 
@@ -202,26 +212,31 @@ func (p *UniversalParser) detectJSONType(filePath string) (models.IaCType, error
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
-	
+
 	// Parse JSON
 	var data map[string]interface{}
 	if err := json.Unmarshal(content, &data); err != nil {
 		return "", fmt.Errorf("failed to parse JSON: %w", err)
 	}
-	
+
 	// Check for CloudFormation template
 	if _, exists := data["AWSTemplateFormatVersion"]; exists {
 		return models.IaCTypeCloudFormation, nil
 	}
-	
+
 	// Check for ARM template
 	if _, exists := data["$schema"]; exists {
-		if schemaStr, ok := data["$schema"].(string); ok && 
-		   strings.Contains(schemaStr, "deploymentTemplate.json") {
+		if schemaStr, ok := data["$schema"].(string); ok &&
+			strings.Contains(schemaStr, "deploymentTemplate.json") {
 			return models.IaCTypeARMTemplate, nil
 		}
 	}
-	
+
+	// Check for Terraform JSON
+	if _, exists := data["terraform_version"]; exists {
+		return models.IaCTypeTerraform, nil
+	}
+
 	return "", fmt.Errorf("unable to determine JSON IaC type for file: %s", filePath)
 }
 
@@ -232,18 +247,28 @@ func (p *UniversalParser) ParseIaCSourceWithAutoDetect(sourcePath string) error 
 	if err != nil {
 		return fmt.Errorf("failed to access source path: %w", err)
 	}
-	
+
 	if fileInfo.IsDir() {
 		// For directories, we need to examine files to determine type
 		// Start by looking for common markers
 		if _, err := os.Stat(filepath.Join(sourcePath, "terraform.tfstate")); err == nil {
 			return p.ParseIaCDirectory(sourcePath, models.IaCTypeTerraform)
 		}
-		
+
 		if _, err := os.Stat(filepath.Join(sourcePath, "Pulumi.yaml")); err == nil {
 			return p.ParseIaCDirectory(sourcePath, models.IaCTypePulumi)
 		}
-		
+
+		// Check for CloudFormation template directory
+		if _, err := os.Stat(filepath.Join(sourcePath, "template.yaml")); err == nil {
+			return p.ParseIaCDirectory(sourcePath, models.IaCTypeCloudFormation)
+		}
+
+		// Check for Ansible playbook directory
+		if _, err := os.Stat(filepath.Join(sourcePath, "playbook.yml")); err == nil {
+			return p.ParseIaCDirectory(sourcePath, models.IaCTypeAnsible)
+		}
+
 		// If no clear markers, we'll need to scan files and make a best guess
 		return p.scanDirectoryForIaC(sourcePath)
 	} else {
@@ -252,7 +277,7 @@ func (p *UniversalParser) ParseIaCSourceWithAutoDetect(sourcePath string) error 
 		if err != nil {
 			return fmt.Errorf("failed to detect IaC type: %w", err)
 		}
-		
+
 		return p.ParseIaCFile(sourcePath, iacType)
 	}
 }
@@ -263,195 +288,216 @@ func (p *UniversalParser) scanDirectoryForIaC(dirPath string) error {
 		if err != nil {
 			return err
 		}
-		
+
 		if info.IsDir() {
 			return nil // Continue to next file
 		}
-		
+
 		// Try to detect IaC type
 		iacType, err := p.AutoDetectIaCType(path)
 		if err != nil {
 			// Not an IaC file we recognize, skip it
 			return nil
 		}
-		
+
 		// Parse the file
 		if err := p.ParseIaCFile(path, iacType); err != nil {
 			// Log error but continue processing other files
 			fmt.Printf("Error parsing file %s: %v\n", path, err)
 			return nil
 		}
-		
+
 		return nil
 	})
 }
 
-// TerraformAdapter implements the IaCAdapter interface for Terraform
-type TerraformAdapter struct {}
+// SyncDirectory synchronizes a directory, detecting changes since last sync
+func (p *UniversalParser) SyncDirectory(dirPath string) error {
+	// Determine IaC type
+	iacType, err := p.detectDirectoryIaCType(dirPath)
+	if err != nil {
+		return fmt.Errorf("failed to determine IaC type for directory: %w", err)
+	}
 
-// NewTerraformAdapter creates a new Terraform adapter
-func NewTerraformAdapter() *TerraformAdapter {
-	return &TerraformAdapter{}
+	// Get the last sync time
+	lastSyncFile := filepath.Join(dirPath, ".idc_last_sync")
+	lastSyncTime := time.Time{}
+
+	if lastSyncData, err := ioutil.ReadFile(lastSyncFile); err == nil {
+		if t, err := time.Parse(time.RFC3339, string(lastSyncData)); err == nil {
+			lastSyncTime = t
+		}
+	}
+
+	// Get last modified time of IaC files
+	var mostRecentModTime time.Time
+
+	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		// Skip non-IaC files and hidden files
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			return nil
+		}
+
+		if info.ModTime().After(lastSyncTime) {
+			// File was modified since last sync
+			if info.ModTime().After(mostRecentModTime) {
+				mostRecentModTime = info.ModTime()
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("error checking for modified files: %w", err)
+	}
+
+	// If no files were modified, no need to sync
+	if mostRecentModTime.IsZero() {
+		return nil
+	}
+
+	// Parse the directory
+	if err := p.ParseIaCDirectory(dirPath, iacType); err != nil {
+		return fmt.Errorf("error parsing directory: %w", err)
+	}
+
+	// Update the last sync time
+	now := time.Now()
+	if err := ioutil.WriteFile(lastSyncFile, []byte(now.Format(time.RFC3339)), 0644); err != nil {
+		return fmt.Errorf("error updating last sync time: %w", err)
+	}
+
+	return nil
 }
 
-// ParseFile parses a Terraform file
-func (a *TerraformAdapter) ParseFile(filePath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement Terraform file parsing
-	// This would typically use a Terraform SDK or execute the CLI to get the state
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+// detectDirectoryIaCType tries to determine the IaC type for a directory
+func (p *UniversalParser) detectDirectoryIaCType(dirPath string) (models.IaCType, error) {
+	// Check for common markers
+	if _, err := os.Stat(filepath.Join(dirPath, "terraform.tfstate")); err == nil {
+		return models.IaCTypeTerraform, nil
+	}
 
-// ParseDirectory parses a directory of Terraform files
-func (a *TerraformAdapter) ParseDirectory(dirPath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement Terraform directory parsing
-	// This would typically use a Terraform SDK or execute the CLI to get the state
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+	if _, err := os.Stat(filepath.Join(dirPath, "Pulumi.yaml")); err == nil {
+		return models.IaCTypePulumi, nil
+	}
 
-// GenerateResourceID generates a consistent ID for a Terraform resource
-func (a *TerraformAdapter) GenerateResourceID(resource map[string]interface{}, provider models.ProviderType) string {
-	// TODO: Implement proper ID generation logic
-	// This would create a consistent ID based on the resource attributes
-	
-	return ""
-}
+	if _, err := os.Stat(filepath.Join(dirPath, "playbook.yml")); err == nil {
+		return models.IaCTypeAnsible, nil
+	}
 
-// CloudFormationAdapter implements the IaCAdapter interface for CloudFormation
-type CloudFormationAdapter struct {}
+	if _, err := os.Stat(filepath.Join(dirPath, "template.yaml")); err == nil {
+		return models.IaCTypeCloudFormation, nil
+	}
 
-// NewCloudFormationAdapter creates a new CloudFormation adapter
-func NewCloudFormationAdapter() *CloudFormationAdapter {
-	return &CloudFormationAdapter{}
-}
+	// Look at file extensions in the directory
+	var tfFiles, yamlFiles, jsonFiles int
 
-// ParseFile parses a CloudFormation template file
-func (a *CloudFormationAdapter) ParseFile(filePath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement CloudFormation file parsing
-	// This would parse the template file and extract resources
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 
-// ParseDirectory parses a directory of CloudFormation templates
-func (a *CloudFormationAdapter) ParseDirectory(dirPath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement CloudFormation directory parsing
-	// This would find all template files and parse them
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+		if info.IsDir() {
+			return nil
+		}
 
-// GenerateResourceID generates a consistent ID for a CloudFormation resource
-func (a *CloudFormationAdapter) GenerateResourceID(resource map[string]interface{}, provider models.ProviderType) string {
-	// TODO: Implement proper ID generation logic
-	// This would create a consistent ID based on the resource attributes
-	
-	return ""
-}
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".tf":
+			tfFiles++
+		case ".yaml", ".yml":
+			yamlFiles++
+		case ".json":
+			jsonFiles++
+		}
 
-// PulumiAdapter implements the IaCAdapter interface for Pulumi
-type PulumiAdapter struct {}
+		return nil
+	})
 
-// NewPulumiAdapter creates a new Pulumi adapter
-func NewPulumiAdapter() *PulumiAdapter {
-	return &PulumiAdapter{}
-}
+	if err != nil {
+		return "", fmt.Errorf("error scanning directory: %w", err)
+	}
 
-// ParseFile parses a Pulumi file
-func (a *PulumiAdapter) ParseFile(filePath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement Pulumi file parsing
-	// This would typically use the Pulumi SDK or CLI to extract state
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+	// Make a best guess based on file counts
+	if tfFiles > 0 {
+		return models.IaCTypeTerraform, nil
+	}
 
-// ParseDirectory parses a directory of Pulumi files
-func (a *PulumiAdapter) ParseDirectory(dirPath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement Pulumi directory parsing
-	// This would typically use the Pulumi SDK or CLI to extract state
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+	if jsonFiles > yamlFiles {
+		// Examine a JSON file to see if it's CloudFormation or ARM
+		var jsonType models.IaCType
 
-// GenerateResourceID generates a consistent ID for a Pulumi resource
-func (a *PulumiAdapter) GenerateResourceID(resource map[string]interface{}, provider models.ProviderType) string {
-	// TODO: Implement proper ID generation logic
-	// This would create a consistent ID based on the resource attributes
-	
-	return ""
-}
+		err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
 
-// AnsibleAdapter implements the IaCAdapter interface for Ansible
-type AnsibleAdapter struct {}
+			if info.IsDir() {
+				return nil
+			}
 
-// NewAnsibleAdapter creates a new Ansible adapter
-func NewAnsibleAdapter() *AnsibleAdapter {
-	return &AnsibleAdapter{}
-}
+			if strings.ToLower(filepath.Ext(path)) == ".json" {
+				t, err := p.detectJSONType(path)
+				if err == nil {
+					jsonType = t
+					return filepath.SkipDir // Stop after finding one
+				}
+			}
 
-// ParseFile parses an Ansible file
-func (a *AnsibleAdapter) ParseFile(filePath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement Ansible file parsing
-	// This would parse the playbook file and extract resources
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+			return nil
+		})
 
-// ParseDirectory parses a directory of Ansible files
-func (a *AnsibleAdapter) ParseDirectory(dirPath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement Ansible directory parsing
-	// This would find all playbook files and parse them
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+		if err != nil {
+			return "", fmt.Errorf("error examining JSON files: %w", err)
+		}
 
-// GenerateResourceID generates a consistent ID for an Ansible resource
-func (a *AnsibleAdapter) GenerateResourceID(resource map[string]interface{}, provider models.ProviderType) string {
-	// TODO: Implement proper ID generation logic
-	// This would create a consistent ID based on the resource attributes
-	
-	return ""
-}
+		if jsonType != "" {
+			return jsonType, nil
+		}
+	}
 
-// ARMAdapter implements the IaCAdapter interface for ARM Templates
-type ARMAdapter struct {}
+	if yamlFiles > 0 {
+		// Examine a YAML file to see if it's CloudFormation or Ansible
+		var yamlType models.IaCType
 
-// NewARMAdapter creates a new ARM template adapter
-func NewARMAdapter() *ARMAdapter {
-	return &ARMAdapter{}
-}
+		err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
 
-// ParseFile parses an ARM template file
-func (a *ARMAdapter) ParseFile(filePath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement ARM template file parsing
-	// This would parse the template file and extract resources
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+			if info.IsDir() {
+				return nil
+			}
 
-// ParseDirectory parses a directory of ARM templates
-func (a *ARMAdapter) ParseDirectory(dirPath string) ([]*models.Resource, []*models.ResourceState, error) {
-	// TODO: Implement ARM template directory parsing
-	// This would find all template files and parse them
-	
-	// For now, we'll return an empty result
-	return []*models.Resource{}, []*models.ResourceState{}, nil
-}
+			ext := strings.ToLower(filepath.Ext(path))
+			if ext == ".yaml" || ext == ".yml" {
+				t, err := p.detectYAMLType(path)
+				if err == nil {
+					yamlType = t
+					return filepath.SkipDir // Stop after finding one
+				}
+			}
 
-// GenerateResourceID generates a consistent ID for an ARM template resource
-func (a *ARMAdapter) GenerateResourceID(resource map[string]interface{}, provider models.ProviderType) string {
-	// TODO: Implement proper ID generation logic
-	// This would create a consistent ID based on the resource attributes
-	
-	return ""
+			return nil
+		})
+
+		if err != nil {
+			return "", fmt.Errorf("error examining YAML files: %w", err)
+		}
+
+		if yamlType != "" {
+			return yamlType, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not determine IaC type for directory")
 }

@@ -36,11 +36,11 @@ type IaCType string
 
 // Supported IaC types
 const (
-	IaCTypeTerraform     IaCType = "terraform"
-	IaCTypePulumi        IaCType = "pulumi"
+	IaCTypeTerraform      IaCType = "terraform"
+	IaCTypePulumi         IaCType = "pulumi"
 	IaCTypeCloudFormation IaCType = "cloudformation"
-	IaCTypeAnsible       IaCType = "ansible"
-	IaCTypeARMTemplate   IaCType = "arm"
+	IaCTypeAnsible        IaCType = "ansible"
+	IaCTypeARMTemplate    IaCType = "arm"
 	// Add more as needed
 )
 
@@ -103,22 +103,23 @@ const (
 type StateSource string
 
 const (
-	StateSourceTerraform     StateSource = "terraform"
-	StateSourceAWS           StateSource = "aws_api"
-	StateSourceAzure         StateSource = "azure_api"
-	StateSourceGCP           StateSource = "gcp_api"
+	StateSourceTerraform      StateSource = "terraform"
+	StateSourceAWS            StateSource = "aws_api"
+	StateSourceAzure          StateSource = "azure_api"
+	StateSourceGCP            StateSource = "gcp_api"
 	StateSourceCloudFormation StateSource = "cloudformation"
+	StateSourceAnsible        StateSource = "ansible"
 	// Add more as needed
 )
 
 // ResourceFilter provides filtering options for resource queries
 type ResourceFilter struct {
-	Provider   ProviderType  `json:"provider,omitempty"`
-	IaCType    IaCType       `json:"iac_type,omitempty"`
-	Region     string        `json:"region,omitempty"`
-	Account    string        `json:"account,omitempty"`
-	Project    string        `json:"project,omitempty"`
-	Types      []ResourceType `json:"types,omitempty"`
-	Tags       Tags          `json:"tags,omitempty"`
-	UpdatedAfter *time.Time   `json:"updated_after,omitempty"`
+	Provider     ProviderType   `json:"provider,omitempty"`
+	IaCType      IaCType        `json:"iac_type,omitempty"`
+	Region       string         `json:"region,omitempty"`
+	Account      string         `json:"account,omitempty"`
+	Project      string         `json:"project,omitempty"`
+	Types        []ResourceType `json:"types,omitempty"`
+	Tags         Tags           `json:"tags,omitempty"`
+	UpdatedAfter *time.Time     `json:"updated_after,omitempty"`
 }

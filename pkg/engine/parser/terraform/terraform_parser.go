@@ -1,4 +1,4 @@
-package parser
+package terraform
 
 import (
 	"encoding/json"
@@ -106,15 +106,15 @@ func (a *TerraformAdapter) processModuleResources(module TerraformModule, module
 
 		// Create resource model
 		resource := &models.Resource{
-			ID:        a.GenerateResourceID(tfResource.AttributeValues, provider),
-			Name:      tfResource.Name,
-			Type:      a.getResourceType(tfResource.Type, provider),
-			Provider:  provider,
-			IaCType:   models.IaCTypeTerraform,
-			Region:    a.getRegionFromTerraformResource(tfResource),
-			Account:   a.getAccountFromTerraformResource(tfResource),
+			ID:         a.GenerateResourceID(tfResource.AttributeValues, provider),
+			Name:       tfResource.Name,
+			Type:       a.getResourceType(tfResource.Type, provider),
+			Provider:   provider,
+			IaCType:    models.IaCTypeTerraform,
+			Region:     a.getRegionFromTerraformResource(tfResource),
+			Account:    a.getAccountFromTerraformResource(tfResource),
 			Properties: make(models.Properties),
-			Tags:      a.extractTags(tfResource.AttributeValues),
+			Tags:       a.extractTags(tfResource.AttributeValues),
 		}
 
 		// Add module info to properties if in a module
@@ -173,7 +173,7 @@ func (a *TerraformAdapter) getProviderFromType(resourceType string) models.Provi
 			return models.ProviderKubernetes
 		}
 	}
-	
+
 	return models.ProviderType(parts[0])
 }
 
@@ -198,7 +198,7 @@ func (a *TerraformAdapter) getResourceType(tfType string, provider models.Provid
 			return models.ResourceTypeGCPInstance
 		}
 	}
-	
+
 	// Default to the terraform type if no mapping exists
 	return models.ResourceType(tfType)
 }
@@ -209,11 +209,11 @@ func (a *TerraformAdapter) getRegionFromTerraformResource(resource TerraformReso
 	if region, ok := resource.AttributeValues["region"].(string); ok {
 		return region
 	}
-	
+
 	if location, ok := resource.AttributeValues["location"].(string); ok {
 		return location
 	}
-	
+
 	// For AWS, we might find it in an ARN
 	if arn, ok := resource.AttributeValues["arn"].(string); ok {
 		// ARN format: arn:partition:service:region:account-id:resource-id
@@ -222,7 +222,7 @@ func (a *TerraformAdapter) getRegionFromTerraformResource(resource TerraformReso
 			return parts[3]
 		}
 	}
-	
+
 	// Default to empty string if we can't determine
 	return ""
 }
@@ -245,7 +245,7 @@ func (a *TerraformAdapter) getAccountFromTerraformResource(resource TerraformRes
 		if subID, ok := resource.AttributeValues["subscription_id"].(string); ok {
 			return subID
 		}
-		
+
 		// Try to extract from ID
 		if id, ok := resource.AttributeValues["id"].(string); ok {
 			// Azure IDs often have format /subscriptions/{subscription-id}/...
@@ -264,14 +264,14 @@ func (a *TerraformAdapter) getAccountFromTerraformResource(resource TerraformRes
 			return project
 		}
 	}
-	
+
 	return ""
 }
 
 // extractTags extracts tags from resource attributes
 func (a *TerraformAdapter) extractTags(attributes map[string]interface{}) models.Tags {
 	tags := make(models.Tags)
-	
+
 	// Check for tags attribute
 	if tagsAttr, ok := attributes["tags"]; ok {
 		// Handle tags as map[string]string
@@ -285,14 +285,14 @@ func (a *TerraformAdapter) extractTags(attributes map[string]interface{}) models
 			}
 		}
 	}
-	
+
 	return tags
 }
 
 // TerraformState represents the Terraform state JSON structure
 type TerraformState struct {
-	FormatVersion    string         `json:"format_version"`
-	TerraformVersion string         `json:"terraform_version"`
+	FormatVersion    string           `json:"format_version"`
+	TerraformVersion string           `json:"terraform_version"`
 	Values           *TerraformValues `json:"values"`
 }
 
@@ -304,8 +304,8 @@ type TerraformValues struct {
 // TerraformModule represents a module in the Terraform state
 type TerraformModule struct {
 	Resources    []TerraformResource `json:"resources"`
-	Address      string             `json:"address"`
-	ChildModules []TerraformModule  `json:"child_modules"`
+	Address      string              `json:"address"`
+	ChildModules []TerraformModule   `json:"child_modules"`
 }
 
 // TerraformResource represents a resource in the Terraform state
