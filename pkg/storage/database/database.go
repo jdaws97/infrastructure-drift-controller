@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"text/template"
 	"time"
 
 	"github.com/jdaws97/infrastructure-drift-controller/internal/config"
@@ -200,7 +201,7 @@ func (db *DB) GetResources(filter models.ResourceFilter) ([]*models.Resource, er
 	query := `SELECT id, name, type, provider, iac_type, region, account, project, 
               properties, tags, created_at, updated_at 
               FROM resources WHERE 1=1`
-	
+
 	var args []interface{}
 	argCounter := 1
 
@@ -528,7 +529,7 @@ func (db *DB) GetDrifts(filter models.DriftFilter) ([]*models.Drift, error) {
 	query := `SELECT id, resource_id, detected_at, status, severity, changes, 
               expected_state_id, actual_state_id, workflow_id, resolved_at, resolution_notes
               FROM drifts WHERE 1=1`
-	
+
 	var args []interface{}
 	argCounter := 1
 
@@ -712,7 +713,7 @@ func (db *DB) GetDriftsByResource(resourceID string, statuses []models.DriftStat
 	query := `SELECT id, resource_id, detected_at, status, severity, changes, 
               expected_state_id, actual_state_id, workflow_id, resolved_at, resolution_notes
               FROM drifts WHERE resource_id = $1`
-	
+
 	args := []interface{}{resourceID}
 	argCounter := 2
 
@@ -1094,7 +1095,7 @@ func (db *DB) GetWorkflows(filter models.WorkflowFilter) ([]*models.Workflow, er
 	query := `SELECT id, name, description, template_id, status, created_at, started_at, 
               completed_at, drift_id, resource_id, current_action, error_message
               FROM workflows WHERE 1=1`
-	
+
 	var args []interface{}
 	argCounter := 1
 
@@ -1631,7 +1632,7 @@ func (db *DB) GetApprovalRequests(workflowID, actionID, resourceID string, statu
 	query := `SELECT id, workflow_id, action_id, status, created_at, expires_at, 
               approvers, min_approvals, drift_id, resource_id, approvals
               FROM approval_requests WHERE 1=1`
-	
+
 	var args []interface{}
 	argCounter := 1
 
@@ -1763,7 +1764,8 @@ func (db *DB) SetResourceMetadata(resourceID, key, value string) error {
 
 // GetNotificationChannel retrieves a notification channel
 func (db *DB) GetNotificationChannel(id string) (*NotificationChannel, error) {
-	query := `SELECT id, name, type, config FROM notification_channels WHERE id = $1`
+	query := `SELECT id, name, type, config, created_at, updated_at
+              FROM notification_channels WHERE id = $1`
 
 	var channel NotificationChannel
 	var configJSON []byte
@@ -1773,6 +1775,8 @@ func (db *DB) GetNotificationChannel(id string) (*NotificationChannel, error) {
 		&channel.Name,
 		&channel.Type,
 		&configJSON,
+		&channel.CreatedAt,
+		&channel.UpdatedAt,
 	)
 
 	if err != nil {
@@ -1783,25 +1787,37 @@ func (db *DB) GetNotificationChannel(id string) (*NotificationChannel, error) {
 	}
 
 	// Parse JSON fields
-	if err := json.Unmarshal(configJSON, &channel.Config); err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
+	if configJSON != nil {
+		if err := json.Unmarshal(configJSON, &channel.Config); err != nil {
+			return nil, fmt.Errorf("failed to parse config: %w", err)
+		}
+	} else {
+		channel.Config = make(map[string]interface{})
 	}
 
 	return &channel, nil
 }
 
+func (t *NotificationTemplate) New(name string) (*template.Template, error) {
+	return template.New(name), nil
+}
+
 // GetNotificationRecipient retrieves a notification recipient
 func (db *DB) GetNotificationRecipient(id string) (*NotificationRecipient, error) {
-	query := `SELECT id, name, email, channels FROM notification_recipients WHERE id = $1`
+	query := `SELECT id, name, email, channels, groups, created_at, updated_at
+              FROM notification_recipients WHERE id = $1`
 
 	var recipient NotificationRecipient
-	var channelsJSON []byte
+	var channelsJSON, groupsJSON []byte
 
 	err := db.conn.QueryRow(query, id).Scan(
 		&recipient.ID,
 		&recipient.Name,
 		&recipient.Email,
 		&channelsJSON,
+		&groupsJSON,
+		&recipient.CreatedAt,
+		&recipient.UpdatedAt,
 	)
 
 	if err != nil {
@@ -1812,16 +1828,50 @@ func (db *DB) GetNotificationRecipient(id string) (*NotificationRecipient, error
 	}
 
 	// Parse JSON fields
-	if err := json.Unmarshal(channelsJSON, &recipient.Channels); err != nil {
-		return nil, fmt.Errorf("failed to parse channels: %w", err)
+	if channelsJSON != nil {
+		if err := json.Unmarshal(channelsJSON, &recipient.Channels); err != nil {
+			return nil, fmt.Errorf("failed to parse channels: %w", err)
+		}
+	}
+
+	if groupsJSON != nil {
+		if err := json.Unmarshal(groupsJSON, &recipient.Groups); err != nil {
+			return nil, fmt.Errorf("failed to parse groups: %w", err)
+		}
 	}
 
 	return &recipient, nil
 }
 
+func (db *DB) GetGroupRecipients(groupID string) ([]string, error) {
+	// First, get the group to make sure it exists
+	query := `SELECT recipients FROM notification_groups WHERE id = $1`
+
+	var recipientsJSON []byte
+	err := db.conn.QueryRow(query, groupID).Scan(&recipientsJSON)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("notification group not found: %s", groupID)
+		}
+		return nil, fmt.Errorf("database error: %w", err)
+	}
+
+	// Parse JSON field
+	var recipients []string
+	if recipientsJSON != nil {
+		if err := json.Unmarshal(recipientsJSON, &recipients); err != nil {
+			return nil, fmt.Errorf("failed to parse recipients: %w", err)
+		}
+	}
+
+	return recipients, nil
+}
+
 // GetNotificationTemplate retrieves a notification template
 func (db *DB) GetNotificationTemplate(id string) (*NotificationTemplate, error) {
-	query := `SELECT id, name, content FROM notification_templates WHERE id = $1`
+	query := `SELECT id, name, content, created_at, updated_at
+              FROM notification_templates WHERE id = $1`
 
 	var template NotificationTemplate
 
@@ -1829,6 +1879,8 @@ func (db *DB) GetNotificationTemplate(id string) (*NotificationTemplate, error) 
 		&template.ID,
 		&template.Name,
 		&template.Content,
+		&template.CreatedAt,
+		&template.UpdatedAt,
 	)
 
 	if err != nil {
@@ -1841,9 +1893,175 @@ func (db *DB) GetNotificationTemplate(id string) (*NotificationTemplate, error) 
 	return &template, nil
 }
 
+func (db *DB) DeleteNotificationTemplate(id string) error {
+	query := `DELETE FROM notification_templates WHERE id = $1`
+
+	result, err := db.conn.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("database error: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error getting rows affected: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("notification template not found: %s", id)
+	}
+
+	return nil
+}
+
+func (db *DB) UpdateNotificationGroup(group *NotificationGroup) error {
+	query := `UPDATE notification_groups
+              SET name = $2, description = $3, recipients = $4, updated_at = $5
+              WHERE id = $1`
+
+	// Update timestamp
+	group.UpdatedAt = time.Now()
+
+	recipientsJSON, err := json.Marshal(group.Recipients)
+	if err != nil {
+		return fmt.Errorf("failed to marshal recipients: %w", err)
+	}
+
+	result, err := db.conn.Exec(query,
+		group.ID,
+		group.Name,
+		group.Description,
+		recipientsJSON,
+		group.UpdatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("database error: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error getting rows affected: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("notification group not found: %s", group.ID)
+	}
+
+	return nil
+}
+
+// GetNotificationGroups retrieves all notification groups
+func (db *DB) GetNotificationGroups() ([]*NotificationGroup, error) {
+	query := `SELECT id, name, description, recipients, created_at, updated_at
+              FROM notification_groups ORDER BY name ASC`
+
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("database error: %w", err)
+	}
+	defer rows.Close()
+
+	var groups []*NotificationGroup
+
+	for rows.Next() {
+		var group NotificationGroup
+		var recipientsJSON []byte
+
+		err := rows.Scan(
+			&group.ID,
+			&group.Name,
+			&group.Description,
+			&recipientsJSON,
+			&group.CreatedAt,
+			&group.UpdatedAt,
+		)
+
+		if err != nil {
+			return nil, fmt.Errorf("error scanning row: %w", err)
+		}
+
+		// Parse JSON fields
+		if recipientsJSON != nil {
+			if err := json.Unmarshal(recipientsJSON, &group.Recipients); err != nil {
+				return nil, fmt.Errorf("failed to parse recipients: %w", err)
+			}
+		}
+
+		groups = append(groups, &group)
+	}
+
+	return groups, nil
+}
+
+// GetNotificationGroup retrieves a notification group by ID
+func (db *DB) GetNotificationGroup(id string) (*NotificationGroup, error) {
+	query := `SELECT id, name, description, recipients, created_at, updated_at
+              FROM notification_groups WHERE id = $1`
+
+	var group NotificationGroup
+	var recipientsJSON []byte
+
+	err := db.conn.QueryRow(query, id).Scan(
+		&group.ID,
+		&group.Name,
+		&group.Description,
+		&recipientsJSON,
+		&group.CreatedAt,
+		&group.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("notification group not found: %s", id)
+		}
+		return nil, fmt.Errorf("database error: %w", err)
+	}
+
+	// Parse JSON fields
+	if recipientsJSON != nil {
+		if err := json.Unmarshal(recipientsJSON, &group.Recipients); err != nil {
+			return nil, fmt.Errorf("failed to parse recipients: %w", err)
+		}
+	}
+
+	return &group, nil
+}
+
+func (db *DB) UpdateNotificationTemplate(template *NotificationTemplate) error {
+	query := `UPDATE notification_templates 
+              SET name = $2, content = $3, updated_at = $4
+              WHERE id = $1`
+
+	// Update timestamp
+	template.UpdatedAt = time.Now()
+
+	result, err := db.conn.Exec(query,
+		template.ID,
+		template.Name,
+		template.Content,
+		template.UpdatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("database error: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error getting rows affected: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("notification template not found: %s", template.ID)
+	}
+
+	return nil
+}
+
 // GetNotificationTemplates retrieves all notification templates
 func (db *DB) GetNotificationTemplates() ([]*NotificationTemplate, error) {
-	query := `SELECT id, name, content FROM notification_templates`
+	query := `SELECT id, name, content, created_at, updated_at
+              FROM notification_templates ORDER BY name ASC`
 
 	rows, err := db.conn.Query(query)
 	if err != nil {
@@ -1860,6 +2078,8 @@ func (db *DB) GetNotificationTemplates() ([]*NotificationTemplate, error) {
 			&template.ID,
 			&template.Name,
 			&template.Content,
+			&template.CreatedAt,
+			&template.UpdatedAt,
 		)
 
 		if err != nil {
@@ -1882,42 +2102,59 @@ func (db *DB) DiscoverResources(ctx context.Context, filter models.ResourceFilte
 
 // Helper types and functions
 
+// NotificationTemplate represents a notification template
+type NotificationTemplate struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // NotificationChannel represents a notification channel
 type NotificationChannel struct {
-	ID     string                 `json:"id"`
-	Name   string                 `json:"name"`
-	Type   string                 `json:"type"`
-	Config map[string]interface{} `json:"config"`
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	Type      string                 `json:"type"`
+	Config    map[string]interface{} `json:"config"`
+	CreatedAt time.Time              `json:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at"`
 }
 
 // NotificationRecipient represents a notification recipient
 type NotificationRecipient struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	Email    string   `json:"email"`
-	Channels []string `json:"channels"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Email     string    `json:"email"`
+	Channels  []string  `json:"channels"`
+	Groups    []string  `json:"groups"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// NotificationTemplate represents a notification template
-type NotificationTemplate struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
+// NotificationGroup represents a group of notification recipients
+type NotificationGroup struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Recipients  []string  `json:"recipients"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // ApprovalRequest represents an approval request
 type ApprovalRequest struct {
-	ID           string        `json:"id"`
-	WorkflowID   string        `json:"workflow_id"`
-	ActionID     string        `json:"action_id"`
+	ID           string         `json:"id"`
+	WorkflowID   string         `json:"workflow_id"`
+	ActionID     string         `json:"action_id"`
 	Status       ApprovalStatus `json:"status"`
-	CreatedAt    time.Time     `json:"created_at"`
-	ExpiresAt    *time.Time    `json:"expires_at,omitempty"`
-	Approvers    []string      `json:"approvers"`
-	MinApprovals int           `json:"min_approvals"`
-	Approvals    []Approval    `json:"approvals,omitempty"`
-	DriftID      string        `json:"drift_id"`
-	ResourceID   string        `json:"resource_id"`
+	CreatedAt    time.Time      `json:"created_at"`
+	ExpiresAt    *time.Time     `json:"expires_at,omitempty"`
+	Approvers    []string       `json:"approvers"`
+	MinApprovals int            `json:"min_approvals"`
+	Approvals    []Approval     `json:"approvals,omitempty"`
+	DriftID      string         `json:"drift_id"`
+	ResourceID   string         `json:"resource_id"`
 }
 
 // ApprovalStatus represents the status of an approval request
@@ -1943,11 +2180,76 @@ func joinStrings(strs []string, sep string) string {
 	if len(strs) == 0 {
 		return ""
 	}
-	
+
 	result := strs[0]
 	for i := 1; i < len(strs); i++ {
 		result += sep + strs[i]
 	}
-	
+
 	return result
+}
+
+func (db *DB) CreateNotificationGroup(group *NotificationGroup) error {
+	query := `INSERT INTO notification_groups
+              (id, name, description, recipients, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6)`
+
+	// Set timestamps if not already set
+	now := time.Now()
+	if group.CreatedAt.IsZero() {
+		group.CreatedAt = now
+	}
+	if group.UpdatedAt.IsZero() {
+		group.UpdatedAt = now
+	}
+
+	recipientsJSON, err := json.Marshal(group.Recipients)
+	if err != nil {
+		return fmt.Errorf("failed to marshal recipients: %w", err)
+	}
+
+	_, err = db.conn.Exec(query,
+		group.ID,
+		group.Name,
+		group.Description,
+		recipientsJSON,
+		group.CreatedAt,
+		group.UpdatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to create notification group: %w", err)
+	}
+
+	return nil
+}
+
+// CreateNotificationTemplate creates a new notification template
+func (db *DB) CreateNotificationTemplate(template *NotificationTemplate) error {
+	query := `INSERT INTO notification_templates
+              (id, name, content, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5)`
+
+	// Set timestamps if not already set
+	now := time.Now()
+	if template.CreatedAt.IsZero() {
+		template.CreatedAt = now
+	}
+	if template.UpdatedAt.IsZero() {
+		template.UpdatedAt = now
+	}
+
+	_, err := db.conn.Exec(query,
+		template.ID,
+		template.Name,
+		template.Content,
+		template.CreatedAt,
+		template.UpdatedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to create notification template: %w", err)
+	}
+
+	return nil
 }

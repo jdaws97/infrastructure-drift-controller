@@ -10,11 +10,12 @@ import (
 
 // Config holds the application configuration
 type Config struct {
-	API       APIConfig
-	Database  DatabaseConfig
-	Detection DetectionConfig
-	Providers ProvidersConfig
-	Workflow  WorkflowConfig
+	API          APIConfig
+	Database     DatabaseConfig
+	Detection    DetectionConfig
+	Providers    ProvidersConfig
+	Workflow     WorkflowConfig
+	Notification NotificationConfig
 }
 
 // APIConfig holds API server configuration
@@ -66,6 +67,16 @@ type GCPConfig struct {
 // WorkflowConfig holds workflow engine configuration
 type WorkflowConfig struct {
 	DefaultApprovalTimeout time.Duration
+}
+
+// NotificationConfig holds notification configuration
+type NotificationConfig struct {
+	DefaultChannels []string               `mapstructure:"default_channels"`
+	Slack           map[string]interface{} `mapstructure:"slack"`
+	Email           map[string]interface{} `mapstructure:"email"`
+	MatterMost      map[string]interface{} `mapstructure:"mattermost"`
+	Teams           map[string]interface{} `mapstructure:"teams"`
+	Webhook         map[string]interface{} `mapstructure:"webhook"`
 }
 
 // Load loads the application configuration from file and environment variables
@@ -126,4 +137,12 @@ func setDefaults(v *viper.Viper) {
 
 	// Workflow defaults
 	v.SetDefault("workflow.defaultApprovalTimeout", "24h")
+
+	// Notification defaults
+	v.SetDefault("notification.slack", map[string]interface{}{})
+	v.SetDefault("notification.email", map[string]interface{}{})
+	v.SetDefault("notification.mattermost", map[string]interface{}{})
+	v.SetDefault("notification.teams", map[string]interface{}{})
+	v.SetDefault("notification.webhook", map[string]interface{}{})
+	v.SetDefault("notification.default_channels", []string{})
 }

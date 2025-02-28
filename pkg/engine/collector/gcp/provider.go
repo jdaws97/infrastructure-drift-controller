@@ -6,12 +6,15 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/compute/apiv1/computepb"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/bigquery/v2"
+	"google.golang.org/api/cloudfunctions/v1"
 	"google.golang.org/api/compute/v1"
-	"google.golang.org/api/iterator"
+	"google.golang.org/api/container/v1"
 	"google.golang.org/api/option"
+	"google.golang.org/api/pubsub/v1"
+	"google.golang.org/api/sqladmin/v1"
 	"google.golang.org/api/storage/v1"
 
 	"github.com/jdaws97/infrastructure-drift-controller/pkg/models"
@@ -35,16 +38,16 @@ func NewProvider(db *database.DB) *Provider {
 // Initialize sets up the GCP credentials and target projects
 func (p *Provider) Initialize(projects []string) error {
 	// Get default credentials
-	cred, err := google.FindDefaultCredentials(context.Background(), 
+	cred, err := google.FindDefaultCredentials(context.Background(),
 		compute.CloudPlatformScope,
 		storage.CloudPlatformScope)
 	if err != nil {
 		return fmt.Errorf("failed to get GCP credentials: %w", err)
 	}
-	
+
 	p.credential = cred
 	p.projects = projects
-	
+
 	return nil
 }
 
@@ -91,7 +94,7 @@ func (p *Provider) ListResources(ctx context.Context, filter models.ResourceFilt
 
 	// Determine which project(s) to scan
 	projects := p.projects
-	
+
 	// If a specific project is provided in the filter, use only that one
 	if filter.Project != "" {
 		// Check if the requested project is in our allowed list
@@ -102,14 +105,14 @@ func (p *Provider) ListResources(ctx context.Context, filter models.ResourceFilt
 				break
 			}
 		}
-		
+
 		if !found {
 			return nil, fmt.Errorf("project %s not authorized", filter.Project)
 		}
-		
+
 		projects = []string{filter.Project}
 	}
-	
+
 	// Scan each project
 	for _, projectID := range projects {
 		// Discover resources based on filter.Types
@@ -120,7 +123,7 @@ func (p *Provider) ListResources(ctx context.Context, filter models.ResourceFilt
 			"gcp_network",
 			"gcp_firewall",
 		}
-		
+
 		if len(filter.Types) > 0 {
 			// Convert filter.Types to string array
 			resourceTypes = make([]string, 0, len(filter.Types))
@@ -128,12 +131,12 @@ func (p *Provider) ListResources(ctx context.Context, filter models.ResourceFilt
 				resourceTypes = append(resourceTypes, string(t))
 			}
 		}
-		
+
 		// Discover resources for each type
 		for _, resourceType := range resourceTypes {
 			var typeResources []*models.Resource
 			var err error
-			
+
 			switch resourceType {
 			case string(models.ResourceTypeGCPInstance):
 				typeResources, err = p.discoverComputeInstances(ctx, projectID, filter)
@@ -146,11 +149,11 @@ func (p *Provider) ListResources(ctx context.Context, filter models.ResourceFilt
 			default:
 				continue // Skip unsupported types
 			}
-			
+
 			if err != nil {
 				return nil, fmt.Errorf("error discovering %s resources in project %s: %w", resourceType, projectID, err)
 			}
-			
+
 			resources = append(resources, typeResources...)
 		}
 	}
@@ -165,15 +168,15 @@ func (p *Provider) discoverFirewalls(ctx context.Context, projectID string, filt
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
 	}
-	
+
 	var resources []*models.Resource
-	
+
 	// List firewalls in the project
 	firewalls, err := computeService.Firewalls.List(projectID).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list firewalls in project %s: %w", projectID, err)
 	}
-	
+
 	for _, firewall := range firewalls.Items {
 		// Create resource from firewall
 		resource := &models.Resource{
@@ -185,25 +188,25 @@ func (p *Provider) discoverFirewalls(ctx context.Context, projectID string, filt
 			Project:  projectID,
 			Tags:     make(models.Tags),
 		}
-		
+
 		// Firewalls are global resources
 		resource.Region = "global"
-		
+
 		// Add some firewall attributes as tags for filtering
 		resource.Tags["network"] = getShortNetworkName(firewall.Network)
 		resource.Tags["direction"] = firewall.Direction
-		
+
 		if firewall.Disabled {
 			resource.Tags["disabled"] = "true"
 		} else {
 			resource.Tags["disabled"] = "false"
 		}
-		
+
 		// Add priority as tag
 		if firewall.Priority != 0 {
 			resource.Tags["priority"] = fmt.Sprintf("%d", firewall.Priority)
 		}
-		
+
 		// Apply tag filter if specified
 		if len(filter.Tags) > 0 {
 			match := true
@@ -217,10 +220,10 @@ func (p *Provider) discoverFirewalls(ctx context.Context, projectID string, filt
 				continue
 			}
 		}
-		
+
 		resources = append(resources, resource)
 	}
-	
+
 	return resources, nil
 }
 
@@ -237,7 +240,7 @@ func getZone(resource *models.Resource) string {
 		}
 		return resource.Region
 	}
-	
+
 	// Try to extract from ID which might contain zone information
 	if strings.Contains(resource.ID, "zones/") {
 		parts := strings.Split(resource.ID, "/")
@@ -247,10 +250,10 @@ func getZone(resource *models.Resource) string {
 			}
 		}
 	}
-	
+
 	// Try to get from metadata
 	// In a real implementation, you might have zone information in metadata
-	
+
 	return ""
 }
 
@@ -296,33 +299,33 @@ func (p *Provider) collectComputeInstanceState(ctx context.Context, resource *mo
 	projectID := resource.Project
 	zone := getZone(resource)
 	instanceName := resource.Name
-	
+
 	// Create compute service client
 	computeService, err := compute.NewService(ctx, option.WithCredentials(p.credential))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
 	}
-	
+
 	// Get instance details
 	instance, err := computeService.Instances.Get(projectID, zone, instanceName).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get instance details: %w", err)
 	}
-	
+
 	// Build properties map
 	properties := models.Properties{
-		"id":            instance.Id,
-		"name":          instance.Name,
-		"machine_type":  getShortMachineType(instance.MachineType),
-		"zone":          getShortZone(instance.Zone),
-		"status":        instance.Status,
+		"id":                 instance.Id,
+		"name":               instance.Name,
+		"machine_type":       getShortMachineType(instance.MachineType),
+		"zone":               getShortZone(instance.Zone),
+		"status":             instance.Status,
 		"creation_timestamp": instance.CreationTimestamp,
 	}
-	
+
 	// Add network interfaces
 	if len(instance.NetworkInterfaces) > 0 {
 		networkInterfaces := make([]map[string]interface{}, 0, len(instance.NetworkInterfaces))
-		
+
 		for _, ni := range instance.NetworkInterfaces {
 			niMap := map[string]interface{}{
 				"name":       ni.Name,
@@ -330,11 +333,11 @@ func (p *Provider) collectComputeInstanceState(ctx context.Context, resource *mo
 				"subnetwork": getShortNetworkName(ni.Subnetwork),
 				"network_ip": ni.NetworkIP,
 			}
-			
+
 			// Add access configs (public IPs)
 			if len(ni.AccessConfigs) > 0 {
 				accessConfigs := make([]map[string]interface{}, 0, len(ni.AccessConfigs))
-				
+
 				for _, ac := range ni.AccessConfigs {
 					accessConfigs = append(accessConfigs, map[string]interface{}{
 						"type":        ac.Type,
@@ -343,20 +346,20 @@ func (p *Provider) collectComputeInstanceState(ctx context.Context, resource *mo
 						"external_ip": ac.ExternalIp,
 					})
 				}
-				
+
 				niMap["access_configs"] = accessConfigs
 			}
-			
+
 			networkInterfaces = append(networkInterfaces, niMap)
 		}
-		
+
 		properties["network_interfaces"] = networkInterfaces
 	}
-	
+
 	// Add disks
 	if len(instance.Disks) > 0 {
 		disks := make([]map[string]interface{}, 0, len(instance.Disks))
-		
+
 		for _, disk := range instance.Disks {
 			diskMap := map[string]interface{}{
 				"auto_delete": disk.AutoDelete,
@@ -366,27 +369,27 @@ func (p *Provider) collectComputeInstanceState(ctx context.Context, resource *mo
 				"mode":        disk.Mode,
 				"type":        disk.Type,
 			}
-			
+
 			disks = append(disks, diskMap)
 		}
-		
+
 		properties["disks"] = disks
 	}
-	
+
 	// Add service accounts
 	if len(instance.ServiceAccounts) > 0 {
 		serviceAccounts := make([]map[string]interface{}, 0, len(instance.ServiceAccounts))
-		
+
 		for _, sa := range instance.ServiceAccounts {
 			serviceAccounts = append(serviceAccounts, map[string]interface{}{
 				"email":  sa.Email,
 				"scopes": sa.Scopes,
 			})
 		}
-		
+
 		properties["service_accounts"] = serviceAccounts
 	}
-	
+
 	// Add scheduling
 	if instance.Scheduling != nil {
 		properties["scheduling"] = map[string]interface{}{
@@ -395,30 +398,30 @@ func (p *Provider) collectComputeInstanceState(ctx context.Context, resource *mo
 			"preemptible":         instance.Scheduling.Preemptible,
 		}
 	}
-	
+
 	// Add tags
 	if instance.Labels != nil {
 		properties["labels"] = instance.Labels
 	}
-	
+
 	// Add network tags
 	if instance.Tags != nil && len(instance.Tags.Items) > 0 {
 		properties["network_tags"] = instance.Tags.Items
 	}
-	
+
 	// Add metadata
 	if instance.Metadata != nil && len(instance.Metadata.Items) > 0 {
 		metadata := make(map[string]string)
-		
+
 		for _, item := range instance.Metadata.Items {
 			if item.Key != "" && item.Value != nil {
 				metadata[item.Key] = *item.Value
 			}
 		}
-		
+
 		properties["metadata"] = metadata
 	}
-	
+
 	return properties, nil
 }
 
@@ -427,62 +430,62 @@ func (p *Provider) collectStorageBucketState(ctx context.Context, resource *mode
 	// Extract resource details
 	projectID := resource.Project
 	bucketName := resource.Name
-	
+
 	// Create storage service client
 	storageService, err := storage.NewService(ctx, option.WithCredentials(p.credential))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Storage service client: %w", err)
 	}
-	
+
 	// Get bucket details
 	bucket, err := storageService.Buckets.Get(bucketName).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bucket details: %w", err)
 	}
-	
+
 	// Build properties map
 	properties := models.Properties{
-		"id":                bucket.Id,
-		"name":              bucket.Name,
-		"location":          bucket.Location,
-		"location_type":     bucket.LocationType,
-		"storage_class":     bucket.StorageClass,
-		"time_created":      bucket.TimeCreated,
-		"project_number":    bucket.ProjectNumber,
+		"id":             bucket.Id,
+		"name":           bucket.Name,
+		"location":       bucket.Location,
+		"location_type":  bucket.LocationType,
+		"storage_class":  bucket.StorageClass,
+		"time_created":   bucket.TimeCreated,
+		"project_number": bucket.ProjectNumber,
 	}
-	
+
 	// Add bucket ACL if available
 	if bucket.Acl != nil {
 		acls := make([]map[string]interface{}, 0, len(bucket.Acl))
-		
+
 		for _, acl := range bucket.Acl {
 			acls = append(acls, map[string]interface{}{
 				"entity": acl.Entity,
 				"role":   acl.Role,
 			})
 		}
-		
+
 		properties["acl"] = acls
 	}
-	
+
 	// Add default object ACL if available
 	if bucket.DefaultObjectAcl != nil {
 		defaultObjectAcl := make([]map[string]interface{}, 0, len(bucket.DefaultObjectAcl))
-		
+
 		for _, acl := range bucket.DefaultObjectAcl {
 			defaultObjectAcl = append(defaultObjectAcl, map[string]interface{}{
 				"entity": acl.Entity,
 				"role":   acl.Role,
 			})
 		}
-		
+
 		properties["default_object_acl"] = defaultObjectAcl
 	}
-	
+
 	// Add lifecycle configuration if available
 	if bucket.Lifecycle != nil && bucket.Lifecycle.Rule != nil {
 		lifecycleRules := make([]map[string]interface{}, 0, len(bucket.Lifecycle.Rule))
-		
+
 		for _, rule := range bucket.Lifecycle.Rule {
 			ruleMap := map[string]interface{}{
 				"action": map[string]interface{}{
@@ -490,73 +493,73 @@ func (p *Provider) collectStorageBucketState(ctx context.Context, resource *mode
 					"storage_class": rule.Action.StorageClass,
 				},
 			}
-			
+
 			// Add condition if available
 			if rule.Condition != nil {
 				conditionMap := map[string]interface{}{}
-				
+
 				if rule.Condition.Age != nil {
 					conditionMap["age"] = *rule.Condition.Age
 				}
-				
+
 				if rule.Condition.CreatedBefore != "" {
 					conditionMap["created_before"] = rule.Condition.CreatedBefore
 				}
-				
+
 				if rule.Condition.NumNewerVersions != nil {
 					conditionMap["num_newer_versions"] = *rule.Condition.NumNewerVersions
 				}
-				
+
 				if rule.Condition.IsLive != nil {
 					conditionMap["is_live"] = *rule.Condition.IsLive
 				}
-				
+
 				if len(rule.Condition.MatchesStorageClass) > 0 {
 					conditionMap["matches_storage_class"] = rule.Condition.MatchesStorageClass
 				}
-				
+
 				ruleMap["condition"] = conditionMap
 			}
-			
+
 			lifecycleRules = append(lifecycleRules, ruleMap)
 		}
-		
+
 		properties["lifecycle_rules"] = lifecycleRules
 	}
-	
+
 	// Add versioning if available
 	if bucket.Versioning != nil {
 		properties["versioning_enabled"] = bucket.Versioning.Enabled
 	}
-	
+
 	// Add CORS configuration if available
 	if bucket.Cors != nil && len(bucket.Cors) > 0 {
 		cors := make([]map[string]interface{}, 0, len(bucket.Cors))
-		
+
 		for _, corsConfig := range bucket.Cors {
 			cors = append(cors, map[string]interface{}{
-				"max_age_seconds":  corsConfig.MaxAgeSeconds,
-				"method":           corsConfig.Method,
-				"origin":           corsConfig.Origin,
-				"response_header":  corsConfig.ResponseHeader,
+				"max_age_seconds": corsConfig.MaxAgeSeconds,
+				"method":          corsConfig.Method,
+				"origin":          corsConfig.Origin,
+				"response_header": corsConfig.ResponseHeader,
 			})
 		}
-		
+
 		properties["cors"] = cors
 	}
-	
+
 	// Add encryption if available
 	if bucket.Encryption != nil && bucket.Encryption.DefaultKmsKeyName != "" {
 		properties["encryption"] = map[string]interface{}{
 			"default_kms_key_name": bucket.Encryption.DefaultKmsKeyName,
 		}
 	}
-	
+
 	// Add labels
 	if bucket.Labels != nil {
 		properties["labels"] = bucket.Labels
 	}
-	
+
 	return properties, nil
 }
 
@@ -565,49 +568,49 @@ func (p *Provider) collectNetworkState(ctx context.Context, resource *models.Res
 	// Extract resource details
 	projectID := resource.Project
 	networkName := resource.Name
-	
+
 	// Create compute service client
 	computeService, err := compute.NewService(ctx, option.WithCredentials(p.credential))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
 	}
-	
+
 	// Get network details
 	network, err := computeService.Networks.Get(projectID, networkName).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get network details: %w", err)
 	}
-	
+
 	// Build properties map
 	properties := models.Properties{
-		"id":                    network.Id,
-		"name":                  network.Name,
-		"description":           network.Description,
+		"id":                      network.Id,
+		"name":                    network.Name,
+		"description":             network.Description,
 		"auto_create_subnetworks": network.AutoCreateSubnetworks,
-		"creation_timestamp":    network.CreationTimestamp,
-		"routing_mode":          network.RoutingConfig.RoutingMode,
+		"creation_timestamp":      network.CreationTimestamp,
+		"routing_mode":            network.RoutingConfig.RoutingMode,
 	}
-	
+
 	// Add subnets
 	if len(network.Subnetworks) > 0 {
 		subnetworks := make([]string, 0, len(network.Subnetworks))
-		
+
 		for _, subnet := range network.Subnetworks {
 			subnetworks = append(subnetworks, getShortSubnetworkName(subnet))
 		}
-		
+
 		properties["subnetworks"] = subnetworks
-		
+
 		// Fetch detailed subnet information
 		subnetDetails := make([]map[string]interface{}, 0, len(network.Subnetworks))
-		
+
 		for _, subnet := range network.Subnetworks {
 			// Extract region and subnet name from URL
 			parts := strings.Split(subnet, "/")
 			if len(parts) < 2 {
 				continue
 			}
-			
+
 			regionIdx := -1
 			for i, part := range parts {
 				if part == "regions" && i+1 < len(parts) {
@@ -615,56 +618,56 @@ func (p *Provider) collectNetworkState(ctx context.Context, resource *models.Res
 					break
 				}
 			}
-			
+
 			if regionIdx == -1 || regionIdx+2 >= len(parts) {
 				continue
 			}
-			
+
 			region := parts[regionIdx]
 			subnetName := parts[len(parts)-1]
-			
+
 			// Get subnet details
 			subnetDetail, err := computeService.Subnetworks.Get(projectID, region, subnetName).Do()
 			if err != nil {
 				continue
 			}
-			
+
 			subnetDetails = append(subnetDetails, map[string]interface{}{
-				"name":                subnetDetail.Name,
-				"region":              getShortRegionName(subnetDetail.Region),
-				"ip_cidr_range":       subnetDetail.IpCidrRange,
+				"name":                     subnetDetail.Name,
+				"region":                   getShortRegionName(subnetDetail.Region),
+				"ip_cidr_range":            subnetDetail.IpCidrRange,
 				"private_ip_google_access": subnetDetail.PrivateIpGoogleAccess,
-				"purpose":             subnetDetail.Purpose,
-				"network":             getShortNetworkName(subnetDetail.Network),
+				"purpose":                  subnetDetail.Purpose,
+				"network":                  getShortNetworkName(subnetDetail.Network),
 			})
 		}
-		
+
 		properties["subnet_details"] = subnetDetails
 	}
-	
+
 	// Get peering connections
 	if network.Peerings != nil && len(network.Peerings) > 0 {
 		peerings := make([]map[string]interface{}, 0, len(network.Peerings))
-		
+
 		for _, peering := range network.Peerings {
 			peeringMap := map[string]interface{}{
-				"name":                       peering.Name,
-				"network":                    peering.Network,
-				"state":                      peering.State,
-				"auto_create_routes":         peering.AutoCreateRoutes,
-				"exchange_subnet_routes":     peering.ExchangeSubnetRoutes,
-				"export_custom_routes":       peering.ExportCustomRoutes,
-				"import_custom_routes":       peering.ImportCustomRoutes,
+				"name":                                peering.Name,
+				"network":                             peering.Network,
+				"state":                               peering.State,
+				"auto_create_routes":                  peering.AutoCreateRoutes,
+				"exchange_subnet_routes":              peering.ExchangeSubnetRoutes,
+				"export_custom_routes":                peering.ExportCustomRoutes,
+				"import_custom_routes":                peering.ImportCustomRoutes,
 				"export_subnet_routes_with_public_ip": peering.ExportSubnetRoutesWithPublicIp,
 				"import_subnet_routes_with_public_ip": peering.ImportSubnetRoutesWithPublicIp,
 			}
-			
+
 			peerings = append(peerings, peeringMap)
 		}
-		
+
 		properties["peerings"] = peerings
 	}
-	
+
 	return properties, nil
 }
 
@@ -673,19 +676,19 @@ func (p *Provider) collectFirewallState(ctx context.Context, resource *models.Re
 	// Extract resource details
 	projectID := resource.Project
 	firewallName := resource.Name
-	
+
 	// Create compute service client
 	computeService, err := compute.NewService(ctx, option.WithCredentials(p.credential))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
 	}
-	
+
 	// Get firewall details
 	firewall, err := computeService.Firewalls.Get(projectID, firewallName).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get firewall details: %w", err)
 	}
-	
+
 	// Build properties map
 	properties := models.Properties{
 		"id":                 firewall.Id,
@@ -697,72 +700,72 @@ func (p *Provider) collectFirewallState(ctx context.Context, resource *models.Re
 		"disabled":           firewall.Disabled,
 		"creation_timestamp": firewall.CreationTimestamp,
 	}
-	
+
 	// Add source ranges
 	if firewall.SourceRanges != nil && len(firewall.SourceRanges) > 0 {
 		properties["source_ranges"] = firewall.SourceRanges
 	}
-	
+
 	// Add destination ranges
 	if firewall.DestinationRanges != nil && len(firewall.DestinationRanges) > 0 {
 		properties["destination_ranges"] = firewall.DestinationRanges
 	}
-	
+
 	// Add source tags
 	if firewall.SourceTags != nil && len(firewall.SourceTags) > 0 {
 		properties["source_tags"] = firewall.SourceTags
 	}
-	
+
 	// Add target tags
 	if firewall.TargetTags != nil && len(firewall.TargetTags) > 0 {
 		properties["target_tags"] = firewall.TargetTags
 	}
-	
+
 	// Add source service accounts
 	if firewall.SourceServiceAccounts != nil && len(firewall.SourceServiceAccounts) > 0 {
 		properties["source_service_accounts"] = firewall.SourceServiceAccounts
 	}
-	
+
 	// Add target service accounts
 	if firewall.TargetServiceAccounts != nil && len(firewall.TargetServiceAccounts) > 0 {
 		properties["target_service_accounts"] = firewall.TargetServiceAccounts
 	}
-	
+
 	// Add allowed rules
 	if firewall.Allowed != nil && len(firewall.Allowed) > 0 {
 		allowed := make([]map[string]interface{}, 0, len(firewall.Allowed))
-		
+
 		for _, rule := range firewall.Allowed {
 			allowed = append(allowed, map[string]interface{}{
 				"ip_protocol": rule.IPProtocol,
 				"ports":       rule.Ports,
 			})
 		}
-		
+
 		properties["allowed"] = allowed
 	}
-	
+
 	// Add denied rules
 	if firewall.Denied != nil && len(firewall.Denied) > 0 {
 		denied := make([]map[string]interface{}, 0, len(firewall.Denied))
-		
+
 		for _, rule := range firewall.Denied {
 			denied = append(denied, map[string]interface{}{
 				"ip_protocol": rule.IPProtocol,
 				"ports":       rule.Ports,
 			})
 		}
-		
+
 		properties["denied"] = denied
 	}
-	
+
 	// Add log config
 	if firewall.LogConfig != nil {
 		properties["log_config"] = map[string]interface{}{
 			"enable": firewall.LogConfig.Enable,
 		}
 	}
-	
+
 	return properties, nil
 }
 
@@ -773,9 +776,9 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
 	}
-	
+
 	var resources []*models.Resource
-	
+
 	// If zone is specified, list instances in that zone
 	if filter.Region != "" {
 		// In GCP, regions contain zones, so we need to get all zones in the region
@@ -783,20 +786,20 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 		if !strings.Contains(regionName, "/") {
 			regionName = fmt.Sprintf("regions/%s", regionName)
 		}
-		
+
 		// List zones in the region
 		zoneList, err := computeService.Zones.List(projectID).Filter(fmt.Sprintf("region=%s", regionName)).Do()
 		if err != nil {
 			return nil, fmt.Errorf("failed to list zones in region %s: %w", regionName, err)
 		}
-		
+
 		// For each zone, list instances
 		for _, zone := range zoneList.Items {
 			instances, err := computeService.Instances.List(projectID, zone.Name).Do()
 			if err != nil {
 				return nil, fmt.Errorf("failed to list instances in zone %s: %w", zone.Name, err)
 			}
-			
+
 			for _, instance := range instances.Items {
 				// Create resource from instance
 				resource := &models.Resource{
@@ -809,14 +812,14 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 					Project:  projectID,
 					Tags:     make(models.Tags),
 				}
-				
+
 				// Add labels as tags
 				if instance.Labels != nil {
 					for k, v := range instance.Labels {
 						resource.Tags[k] = v
 					}
 				}
-				
+
 				// Apply tag filter if specified
 				if len(filter.Tags) > 0 {
 					match := true
@@ -830,7 +833,7 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 						continue
 					}
 				}
-				
+
 				resources = append(resources, resource)
 			}
 		}
@@ -841,13 +844,13 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 		if err != nil {
 			return nil, fmt.Errorf("failed to list zones: %w", err)
 		}
-		
+
 		for _, zone := range zoneList.Items {
 			instances, err := computeService.Instances.List(projectID, zone.Name).Do()
 			if err != nil {
 				return nil, fmt.Errorf("failed to list instances in zone %s: %w", zone.Name, err)
 			}
-			
+
 			for _, instance := range instances.Items {
 				// Create resource from instance
 				resource := &models.Resource{
@@ -860,14 +863,14 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 					Project:  projectID,
 					Tags:     make(models.Tags),
 				}
-				
+
 				// Add labels as tags
 				if instance.Labels != nil {
 					for k, v := range instance.Labels {
 						resource.Tags[k] = v
 					}
 				}
-				
+
 				// Apply tag filter if specified
 				if len(filter.Tags) > 0 {
 					match := true
@@ -881,17 +884,17 @@ func (p *Provider) discoverComputeInstances(ctx context.Context, projectID strin
 						continue
 					}
 				}
-				
+
 				// Apply region filter if specified
 				if filter.Region != "" && !strings.Contains(resource.Region, filter.Region) {
 					continue
 				}
-				
+
 				resources = append(resources, resource)
 			}
 		}
 	}
-	
+
 	return resources, nil
 }
 
@@ -902,15 +905,15 @@ func (p *Provider) discoverStorageBuckets(ctx context.Context, projectID string,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Storage service client: %w", err)
 	}
-	
+
 	var resources []*models.Resource
-	
+
 	// List buckets in the project
 	buckets, err := storageService.Buckets.List(projectID).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list buckets in project %s: %w", projectID, err)
 	}
-	
+
 	for _, bucket := range buckets.Items {
 		// Create resource from bucket
 		resource := &models.Resource{
@@ -923,14 +926,14 @@ func (p *Provider) discoverStorageBuckets(ctx context.Context, projectID string,
 			Project:  projectID,
 			Tags:     make(models.Tags),
 		}
-		
+
 		// Add labels as tags
 		if bucket.Labels != nil {
 			for k, v := range bucket.Labels {
 				resource.Tags[k] = v
 			}
 		}
-		
+
 		// Apply tag filter if specified
 		if len(filter.Tags) > 0 {
 			match := true
@@ -944,15 +947,15 @@ func (p *Provider) discoverStorageBuckets(ctx context.Context, projectID string,
 				continue
 			}
 		}
-		
+
 		// Apply region filter if specified
 		if filter.Region != "" && bucket.Location != filter.Region {
 			continue
 		}
-		
+
 		resources = append(resources, resource)
 	}
-	
+
 	return resources, nil
 }
 
@@ -963,10 +966,481 @@ func (p *Provider) discoverNetworks(ctx context.Context, projectID string, filte
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
 	}
-	
+
 	var resources []*models.Resource
-	
+
 	// List networks in the project
 	networks, err := computeService.Networks.List(projectID).Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list networks in project %s: %w", projectID, err)
+	}
+	return resources, nil
+}
+
+// discoverNetworkSecurityGroups discovers GCP network security groups (firewall rules)
+func (p *Provider) discoverNetworkSecurityGroups(ctx context.Context, subscriptionID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Create firewall client
+	computeService, err := compute.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Compute service client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List firewalls in the project
+	firewalls, err := computeService.Firewalls.List(subscriptionID).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list firewalls in project %s: %w", subscriptionID, err)
+	}
+
+	for _, firewall := range firewalls.Items {
+		// Create resource from firewall
+		resource := &models.Resource{
+			ID:       fmt.Sprintf("%d", firewall.Id),
+			Name:     firewall.Name,
+			Type:     "gcp_firewall",
+			Provider: models.ProviderGCP,
+			IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+			Region:   "global",                // Firewalls are global resources
+			Project:  subscriptionID,
+			Tags:     make(models.Tags),
+		}
+
+		// Add some firewall attributes as tags for filtering
+		resource.Tags["network"] = getShortNetworkName(firewall.Network)
+		resource.Tags["direction"] = firewall.Direction
+
+		if firewall.Disabled {
+			resource.Tags["disabled"] = "true"
+		} else {
+			resource.Tags["disabled"] = "false"
+		}
+
+		// Add priority as tag
+		if firewall.Priority != 0 {
+			resource.Tags["priority"] = fmt.Sprintf("%d", firewall.Priority)
+		}
+
+		// Apply tag filter if specified
+		if len(filter.Tags) > 0 {
+			match := true
+			for k, v := range filter.Tags {
+				if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		resources = append(resources, resource)
+	}
+
+	return resources, nil
+}
+
+// discoverStorageBuckets discovers GCP storage buckets
+func (p *Provider) discoverStorageBuckets(ctx context.Context, projectID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Create storage service client
+	storageService, err := storage.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Storage service client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List buckets in the project
+	buckets, err := storageService.Buckets.List(projectID).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list buckets in project %s: %w", projectID, err)
+	}
+
+	for _, bucket := range buckets.Items {
+		// Create resource from bucket
+		resource := &models.Resource{
+			ID:       bucket.Id,
+			Name:     bucket.Name,
+			Type:     "gcp_storage_bucket",
+			Provider: models.ProviderGCP,
+			IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+			Region:   bucket.Location,
+			Project:  projectID,
+			Tags:     make(models.Tags),
+		}
+
+		// Add labels as tags
+		if bucket.Labels != nil {
+			for k, v := range bucket.Labels {
+				resource.Tags[k] = v
+			}
+		}
+
+		// Apply tag filter if specified
+		if len(filter.Tags) > 0 {
+			match := true
+			for k, v := range filter.Tags {
+				if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		// Apply region filter if specified
+		if filter.Region != "" && bucket.Location != filter.Region {
+			continue
+		}
+
+		resources = append(resources, resource)
+	}
+
+	return resources, nil
+}
+
+// discoverDatabaseInstances discovers GCP database instances (Cloud SQL)
+func (p *Provider) discoverDatabaseInstances(ctx context.Context, projectID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Import the Cloud SQL Admin API
+	sqlService, err := sqladmin.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Cloud SQL Admin client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List database instances in the project
+	instances, err := sqlService.Instances.List(projectID).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Cloud SQL instances in project %s: %w", projectID, err)
+	}
+
+	for _, instance := range instances.Items {
+		// Create resource from database instance
+		resource := &models.Resource{
+			ID:       instance.Name,
+			Name:     instance.Name,
+			Type:     "gcp_sql_instance",
+			Provider: models.ProviderGCP,
+			IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+			Region:   instance.Region,
+			Project:  projectID,
+			Tags:     make(models.Tags),
+		}
+
+		// Add database properties as tags for filtering
+		resource.Tags["database_version"] = instance.DatabaseVersion
+		resource.Tags["tier"] = instance.Settings.Tier
+		resource.Tags["state"] = instance.State
+
+		// Add user labels as tags
+		if instance.Settings.UserLabels != nil {
+			for k, v := range instance.Settings.UserLabels {
+				resource.Tags[k] = v
+			}
+		}
+
+		// Apply tag filter if specified
+		if len(filter.Tags) > 0 {
+			match := true
+			for k, v := range filter.Tags {
+				if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		// Apply region filter if specified
+		if filter.Region != "" && instance.Region != filter.Region {
+			continue
+		}
+
+		resources = append(resources, resource)
+	}
+
+	return resources, nil
+}
+
+// discoverPubSubTopics discovers GCP Pub/Sub topics
+func (p *Provider) discoverPubSubTopics(ctx context.Context, projectID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Import the Pub/Sub API
+	pubsubService, err := pubsub.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Pub/Sub client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List topics in the project
+	topics, err := pubsubService.Projects.Topics.List(fmt.Sprintf("projects/%s", projectID)).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Pub/Sub topics in project %s: %w", projectID, err)
+	}
+
+	for _, topic := range topics.Topics {
+		// Extract topic name from full path
+		parts := strings.Split(topic.Name, "/")
+		topicName := parts[len(parts)-1]
+
+		// Create resource from topic
+		resource := &models.Resource{
+			ID:       topic.Name,
+			Name:     topicName,
+			Type:     "gcp_pubsub_topic",
+			Provider: models.ProviderGCP,
+			IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+			Region:   "global",                // Pub/Sub topics are global resources
+			Project:  projectID,
+			Tags:     make(models.Tags),
+		}
+
+		// Get topic labels
+		topicInfo, err := pubsubService.Projects.Topics.Get(topic.Name).Do()
+		if err == nil && topicInfo.Labels != nil {
+			for k, v := range topicInfo.Labels {
+				resource.Tags[k] = v
+			}
+		}
+
+		// Apply tag filter if specified
+		if len(filter.Tags) > 0 {
+			match := true
+			for k, v := range filter.Tags {
+				if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		resources = append(resources, resource)
+	}
+
+	return resources, nil
+}
+
+// discoverCloudFunctions discovers GCP Cloud Functions
+func (p *Provider) discoverCloudFunctions(ctx context.Context, projectID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Import the Cloud Functions API
+	cloudfunctionsService, err := cloudfunctions.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Cloud Functions client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List functions in the project
+	// Note: Cloud Functions are regional resources, so we need to check all regions
+	// if a specific region is not specified
+	regions := []string{"us-central1", "us-east1", "europe-west1", "asia-east1"}
+	if filter.Region != "" {
+		regions = []string{filter.Region}
+	}
+
+	for _, region := range regions {
+		functions, err := cloudfunctionsService.Projects.Locations.Functions.List(
+			fmt.Sprintf("projects/%s/locations/%s", projectID, region)).Do()
+		if err != nil {
+			// Log but continue with other regions
+			fmt.Printf("Error listing Cloud Functions in region %s: %v\n", region, err)
+			continue
+		}
+
+		for _, function := range functions.Functions {
+			// Extract function name from full path
+			parts := strings.Split(function.Name, "/")
+			functionName := parts[len(parts)-1]
+
+			// Create resource from function
+			resource := &models.Resource{
+				ID:       function.Name,
+				Name:     functionName,
+				Type:     "gcp_cloudfunctions_function",
+				Provider: models.ProviderGCP,
+				IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+				Region:   region,
+				Project:  projectID,
+				Tags:     make(models.Tags),
+			}
+
+			// Add function properties as tags
+			resource.Tags["runtime"] = function.Runtime
+			resource.Tags["status"] = function.Status
+			resource.Tags["entry_point"] = function.EntryPoint
+
+			// Add explicit labels
+			if function.Labels != nil {
+				for k, v := range function.Labels {
+					resource.Tags[k] = v
+				}
+			}
+
+			// Apply tag filter if specified
+			if len(filter.Tags) > 0 {
+				match := true
+				for k, v := range filter.Tags {
+					if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+						match = false
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+
+			resources = append(resources, resource)
+		}
+	}
+
+	return resources, nil
+}
+
+// discoverGKEClusters discovers Google Kubernetes Engine clusters
+func (p *Provider) discoverGKEClusters(ctx context.Context, projectID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Import the Container API (GKE)
+	containerService, err := container.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GKE client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List clusters in the project
+	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	resp, err := containerService.Projects.Locations.Clusters.List(parent).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list GKE clusters in project %s: %w", projectID, err)
+	}
+
+	for _, cluster := range resp.Clusters {
+		// Create resource from cluster
+		resource := &models.Resource{
+			ID:       cluster.Name,
+			Name:     cluster.Name,
+			Type:     "gcp_container_cluster",
+			Provider: models.ProviderGCP,
+			IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+			Region:   cluster.Location,
+			Project:  projectID,
+			Tags:     make(models.Tags),
+		}
+
+		// Add cluster properties as tags
+		resource.Tags["status"] = cluster.Status
+		resource.Tags["node_version"] = cluster.CurrentNodeVersion
+		resource.Tags["master_version"] = cluster.CurrentMasterVersion
+		resource.Tags["network"] = getShortNetworkName(cluster.Network)
+		resource.Tags["subnetwork"] = getShortSubnetworkName(cluster.Subnetwork)
+
+		// Add resource labels
+		if cluster.ResourceLabels != nil {
+			for k, v := range cluster.ResourceLabels {
+				resource.Tags[k] = v
+			}
+		}
+
+		// Apply tag filter if specified
+		if len(filter.Tags) > 0 {
+			match := true
+			for k, v := range filter.Tags {
+				if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		// Apply region filter if specified
+		if filter.Region != "" && cluster.Location != filter.Region {
+			continue
+		}
+
+		resources = append(resources, resource)
+	}
+
+	return resources, nil
+}
+
+// discoverBigQueryDatasets discovers BigQuery datasets
+func (p *Provider) discoverBigQueryDatasets(ctx context.Context, projectID string, filter models.ResourceFilter) ([]*models.Resource, error) {
+	// Import the BigQuery API
+	bigqueryService, err := bigquery.NewService(ctx, option.WithCredentials(p.credential))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create BigQuery client: %w", err)
+	}
+
+	var resources []*models.Resource
+
+	// List datasets in the project
+	datasets, err := bigqueryService.Datasets.List(projectID).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list BigQuery datasets in project %s: %w", projectID, err)
+	}
+
+	for _, dataset := range datasets.Datasets {
+		// Create resource from dataset
+		resource := &models.Resource{
+			ID:       dataset.Id,
+			Name:     dataset.DatasetReference.DatasetId,
+			Type:     "gcp_bigquery_dataset",
+			Provider: models.ProviderGCP,
+			IaCType:  models.IaCTypeTerraform, // Assume Terraform for now
+			Region:   dataset.Location,
+			Project:  projectID,
+			Tags:     make(models.Tags),
+		}
+
+		// Get dataset details
+		datasetInfo, err := bigqueryService.Datasets.Get(projectID, dataset.DatasetReference.DatasetId).Do()
+		if err == nil {
+			// Add labels
+			if datasetInfo.Labels != nil {
+				for k, v := range datasetInfo.Labels {
+					resource.Tags[k] = v
+				}
+			}
+
+			// Add some properties as tags
+			if datasetInfo.DefaultTableExpirationMs != nil {
+				resource.Tags["default_table_expiration_ms"] = fmt.Sprintf("%d", *datasetInfo.DefaultTableExpirationMs)
+			}
+		}
+
+		// Apply tag filter if specified
+		if len(filter.Tags) > 0 {
+			match := true
+			for k, v := range filter.Tags {
+				if resourceV, exists := resource.Tags[k]; !exists || resourceV != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+
+		// Apply region filter if specified
+		if filter.Region != "" && dataset.Location != filter.Region {
+			continue
+		}
+
+		resources = append(resources, resource)
+	}
+
+	return resources, nil
+}
