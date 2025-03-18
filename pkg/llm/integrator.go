@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jdaws97/infrastructure-drift-controller/pkg/cloud"
 	"github.com/jdaws97/infrastructure-drift-controller/pkg/drift"
 	"github.com/jdaws97/infrastructure-drift-controller/pkg/logging"
 )
@@ -148,38 +147,54 @@ func (i *Integrator) parseReActResponse(response string) (ReActStep, bool, error
 	
 	// Extract thought
 	thought := ""
-	for i, line := range lines {
-		if strings.HasPrefix(strings.ToLower(line), "thought:") {
-			thought = strings.TrimPrefix(strings.TrimSpace(line), "Thought:")
+	thoughtStarted := false
+	actionStarted := false
+	
+	for _, line := range lines {
+		lineText := strings.TrimSpace(line)
+		
+		if strings.HasPrefix(strings.ToLower(lineText), "thought:") {
+			thoughtStarted = true
+			thought = strings.TrimPrefix(lineText, "Thought:")
+			thought = strings.TrimPrefix(thought, "thought:")
 			thought = strings.TrimSpace(thought)
-			
-			// Check if the thought continues on multiple lines
-			for j := i + 1; j < len(lines); j++ {
-				if strings.HasPrefix(strings.ToLower(lines[j]), "action:") {
-					break
-				}
-				thought += " " + strings.TrimSpace(lines[j])
-			}
+			continue
+		}
+		
+		if strings.HasPrefix(strings.ToLower(lineText), "action:") {
+			actionStarted = true
 			break
+		}
+		
+		if thoughtStarted && !actionStarted && lineText != "" {
+			thought += " " + lineText
 		}
 	}
 	
 	// Extract action
 	action := ""
-	for i, line := range lines {
-		if strings.HasPrefix(strings.ToLower(line), "action:") {
-			action = strings.TrimPrefix(strings.TrimSpace(line), "Action:")
+	actionStarted = false
+	resultStarted := false
+	
+	for _, line := range lines {
+		lineText := strings.TrimSpace(line)
+		
+		if strings.HasPrefix(strings.ToLower(lineText), "action:") {
+			actionStarted = true
+			action = strings.TrimPrefix(lineText, "Action:")
+			action = strings.TrimPrefix(action, "action:")
 			action = strings.TrimSpace(action)
-			
-			// Check if the action continues on multiple lines
-			for j := i + 1; j < len(lines); j++ {
-				if strings.HasPrefix(strings.ToLower(lines[j]), "result:") || 
-				   j == len(lines) - 1 {
-					break
-				}
-				action += " " + strings.TrimSpace(lines[j])
-			}
+			continue
+		}
+		
+		if strings.HasPrefix(strings.ToLower(lineText), "result:") || 
+		   strings.HasPrefix(strings.ToLower(lineText), "remediation plan:") {
+			resultStarted = true
 			break
+		}
+		
+		if actionStarted && !resultStarted && lineText != "" {
+			action += " " + lineText
 		}
 	}
 	

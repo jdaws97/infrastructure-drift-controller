@@ -92,8 +92,8 @@ func processModule(module *tfjson.StateModule, modulePath string, resources map[
 		var resourceID string
 		providerName := ""
 
-		if res.Provider != "" {
-			parts := strings.Split(res.Provider, "/")
+		if res.ProviderName != "" {
+			parts := strings.Split(res.ProviderName, "/")
 			if len(parts) > 0 {
 				providerName = parts[0]
 			}
@@ -101,6 +101,9 @@ func processModule(module *tfjson.StateModule, modulePath string, resources map[
 
 		// Extract attributes and dependencies
 		var dependencies []string
+		if res.DependsOn != nil {
+			dependencies = res.DependsOn
+		}
 		
 		// Try to get the ID based on common ID field names
 		idFields := []string{"id", "arn", "name"}

@@ -265,7 +265,7 @@ func (a *App) processDriftsWithLLM(ctx context.Context, drifts []drift.DriftRepo
 	for _, driftReport := range drifts {
 		wg.Add(1)
 		
-		go func(drift drift.DriftReport) {
+		go func(driftItem drift.DriftReport) {
 			defer wg.Done()
 			
 			// Acquire semaphore token
@@ -273,16 +273,16 @@ func (a *App) processDriftsWithLLM(ctx context.Context, drifts []drift.DriftRepo
 			defer func() { <-semaphore }()
 			
 			// Skip low severity drifts if configured
-			if drift.Severity == drift.SeverityLow && !a.config.Remediation.Enabled {
+			if driftItem.Severity == drift.SeverityLow && !a.config.Remediation.Enabled {
 				a.logger.Info("Skipping low severity drift for %s (%s)", 
-					drift.ResourceName, drift.ResourceID)
+					driftItem.ResourceName, driftItem.ResourceID)
 				return
 			}
 			
 			// Get context for the LLM
 			stateContext := map[string]interface{}{
-				"resource_type": drift.ResourceType,
-				"resource_id":   drift.ResourceID,
+				"resource_type": driftItem.ResourceType,
+				"resource_id":   driftItem.ResourceID,
 				// Add more context as needed
 			}
 			
@@ -293,29 +293,29 @@ func (a *App) processDriftsWithLLM(ctx context.Context, drifts []drift.DriftRepo
 			
 			// Generate remediation plan using LLM
 			a.logger.Info("Generating remediation plan for %s (%s)", 
-				drift.ResourceName, drift.ResourceID)
+			driftItem.ResourceName, driftItem.ResourceID)
 			
-			plan, err := a.llmIntegrator.AnalyzeDrift(ctx, drift, stateContext, cloudContext)
+			plan, err := a.llmIntegrator.AnalyzeDrift(ctx, driftItem, stateContext, cloudContext)
 			if err != nil {
-				a.logger.Error(err, "Failed to analyze drift with LLM for %s", drift.ResourceID)
+				a.logger.Error(err, "Failed to analyze drift with LLM for %s", driftItem.ResourceID)
 				return
 			}
 			
 			a.logger.Info("Generated remediation plan for %s: %s", 
-				drift.ResourceID, plan.Description)
+			driftItem.ResourceID, plan.Description)
 			
 			// Create remediation
 			if a.config.Remediation.Enabled {
-				a.logger.Info("Creating remediation for %s", drift.ResourceID)
+				a.logger.Info("Creating remediation for %s", driftItem.ResourceID)
 				
-				remediation, err := a.remediationTrigger.CreateRemediation(ctx, drift, plan)
+				remediation, err := a.remediationTrigger.CreateRemediation(ctx, driftItem, plan)
 				if err != nil {
-					a.logger.Error(err, "Failed to create remediation for %s", drift.ResourceID)
+					a.logger.Error(err, "Failed to create remediation for %s", driftItem.ResourceID)
 					return
 				}
 				
 				a.logger.Info("Created remediation %s for drift %s", 
-					remediation.ID, drift.ID)
+					remediation.ID, driftItem.ID)
 			} else {
 				a.logger.Info("Remediation is disabled, skipping creation")
 			}
